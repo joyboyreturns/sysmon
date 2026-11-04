@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sysmon-terminal"
-version = "1.0.0"
+version = "1.0.1"
 description = "Interactive Linux system monitor with CPU topology and Docker usage"
 readme = "README.md"
 requires-python = ">=3.9"

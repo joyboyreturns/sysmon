@@ -68,36 +68,69 @@ class Monitor:
         self.containers = []
         self.docker_status = 'Sampling containers…'
         self.docker_updated = None
+        self.docker_metadata = {}
+        self.docker_metadata_updated = None
         if shutil.which('docker'):
             threading.Thread(target=self.docker_loop, daemon=True).start()
         else:
             self.docker_status = 'Docker is not installed'
 
+    def docker_error(self, message):
+        previous = '; showing last sample' if self.docker_updated is not None else ''
+        self.docker_status = message + previous + '; retrying…'
+
     def docker_loop(self):
         while True:
             try:
-                p = subprocess.run(['docker', 'stats', '--all', '--no-stream', '--format', '{{json .}}'],
-                                   capture_output=True, text=True, timeout=8)
-                if p.returncode:
-                    self.docker_status = 'Docker unavailable (daemon or permissions)'
-                    self.containers = []
-                else:
-                    rows = [json.loads(s) for s in p.stdout.splitlines() if s.strip()]
-                    meta = subprocess.run(['docker', 'ps', '--all', '--no-trunc', '--format', '{{json .}}'],
-                                          capture_output=True, text=True, timeout=5)
-                    if meta.returncode == 0:
-                        by_name = {r['Names']: r for r in (json.loads(line) for line in meta.stdout.splitlines() if line.strip())}
-                        for row in rows:
-                            details = by_name.get(row['Name'], {})
-                            for field in ('Image', 'State', 'Status', 'Ports', 'CreatedAt'):
-                                row[field] = details.get(field, 'unavailable')
-                    self.containers = sorted(rows, key=lambda r: float(r['MemPerc'].rstrip('%')), reverse=True)
-                    self.docker_status = '%d containers (including stopped)' % len(rows)
-                    self.docker_updated = time.monotonic()
-            except (OSError, subprocess.TimeoutExpired, ValueError, KeyError):
-                self.docker_status = 'Docker stats unavailable; retrying…'
-                self.containers = []
+                self.poll_docker_stats()
+            except subprocess.TimeoutExpired:
+                self.docker_error('Docker stats timed out (30s)')
+            except OSError:
+                self.docker_error('Cannot run Docker')
+            except (ValueError, KeyError, TypeError):
+                self.docker_error('Invalid Docker stats response')
             time.sleep(2)
+
+    def merge_docker_metadata(self, rows):
+        for row in rows:
+            details = self.docker_metadata.get(row['Name'], {})
+            for field in ('Image', 'State', 'Status', 'Ports', 'CreatedAt'):
+                row[field] = details.get(field, 'unavailable')
+
+    def poll_docker_stats(self):
+        p = subprocess.run(['docker', 'stats', '--all', '--no-stream', '--format', '{{json .}}'],
+                           capture_output=True, text=True, timeout=30)
+        if p.returncode:
+            error = p.stderr.strip().splitlines()
+            self.docker_error((error[0][:100] if error else 'Docker stats failed'))
+            return
+        rows = [json.loads(line) for line in p.stdout.splitlines() if line.strip()]
+        for row in rows:
+            if not isinstance(row, dict) or not row.get('Name'):
+                raise ValueError('Docker stats row has no name')
+            for field in ('CPUPerc', 'MemPerc', 'MemUsage', 'NetIO', 'BlockIO', 'PIDs'):
+                if not isinstance(row.get(field), str):
+                    row[field] = '--'
+        self.merge_docker_metadata(rows)
+        # Publish metrics before fetching optional details. Slow/failed `ps`
+        # requests must never discard a successful stats sample.
+        self.containers = sorted(rows, key=lambda r: percent(r['MemPerc']), reverse=True)
+        self.docker_updated = time.monotonic()
+        self.docker_status = '%d containers (including stopped)' % len(rows)
+        if self.docker_metadata_updated is not None and time.monotonic() - self.docker_metadata_updated < 15:
+            return
+        try:
+            meta = subprocess.run(['docker', 'ps', '--all', '--no-trunc', '--format', '{{json .}}'],
+                                  capture_output=True, text=True, timeout=5)
+            if meta.returncode:
+                self.docker_status += ' · details delayed'
+                return
+            details = [json.loads(line) for line in meta.stdout.splitlines() if line.strip()]
+            self.docker_metadata = {item['Names']: item for item in details}
+            self.docker_metadata_updated = time.monotonic()
+            self.merge_docker_metadata(rows)
+        except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
+            self.docker_status += ' · details delayed'
 
     def sample(self):
         now = time.monotonic()
@@ -591,7 +624,7 @@ def run(screen, interval):
 def main():
     parser = argparse.ArgumentParser(description='Interactive Linux system monitor with six live tabs.')
     parser.add_argument('interval', nargs='?', type=float, default=1, help='refresh seconds (default 1); -1 for snapshot')
-    parser.add_argument('--version', action='version', version='sysmon 1.0.0')
+    parser.add_argument('--version', action='version', version='sysmon 1.0.1')
     args = parser.parse_args()
     if args.interval == -1:
         m = Monitor()

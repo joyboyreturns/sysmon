@@ -55,7 +55,7 @@ sysmon --help
 
 - Logical CPU usage is 0–100%. Process and Docker CPU can exceed 100% (100% = one logical CPU); their bars saturate at 100% while the number retains the full value.
 - RAM used is total minus available. Memory breakdown categories can overlap.
-- Docker RAM is the Docker CLI working-set figure and its configured limit. Percentage is relative to that limit. Docker polling runs separately, typically every 3–4 seconds; the tab shows sample age. Stopped containers may report zero statistics.
+- Docker RAM is the Docker CLI working-set figure and its configured limit. Percentage is relative to that limit. Docker polling runs separately, typically every 3–4 seconds; the tab shows sample age. Busy-daemon requests have a 30-second limit. Temporary errors retain the last successful sample and show an explicit retry status; optional container details cannot clear live metrics. Stopped containers may report zero statistics.
 - Intel P/E classes use kernel hybrid PMU lists, with optional per-CPU CPUID fallback. Known Comet Lake cores are labeled standard, with no P/E split.
 - AMD/Hygon detection uses CPUID leaf `0x80000026` when available, distinguishing reported performance, efficiency/compact, and low-power classes. A missing class is explicitly unreported, including on older CPUs and VMs.
 - ARM uses implementer/part IDs to show known Cortex/Neoverse names and vendor identities (Arm, Apple, Qualcomm, NVIDIA, Ampere and others); unknown parts retain their raw ID. RISC-V uarch and PowerPC model names are preserved. These architectures are not forced into Intel P/E terminology.

@@ -123,6 +123,77 @@ class LiveTerminal(unittest.TestCase):
                 proc.wait()
             os.close(master)
 
+class DockerPolling(unittest.TestCase):
+    def monitor(self):
+        from sysmon.app import Monitor
+        m = object.__new__(Monitor)
+        m.containers = [{'Name': 'last-good', 'MemPerc': '5%'}]
+        m.docker_updated = 123
+        m.docker_status = 'previous sample'
+        m.docker_metadata = {}
+        m.docker_metadata_updated = None
+        return m
+
+    def poll(self, monitor, effects):
+        with patch('sysmon.app.subprocess.run', side_effect=effects), patch('sysmon.app.time.sleep', side_effect=StopIteration), patch('sysmon.app.time.monotonic', return_value=456):
+            with self.assertRaises(StopIteration):
+                monitor.docker_loop()
+
+    def stats(self, rows):
+        import subprocess, json
+        return subprocess.CompletedProcess([], 0, '\n'.join(json.dumps(r) for r in rows), '')
+
+    def test_timeout_preserves_last_successful_sample(self):
+        import subprocess
+        m = self.monitor()
+        self.poll(m, [subprocess.TimeoutExpired(['docker', 'stats'], 30)])
+        self.assertEqual(m.containers[0]['Name'], 'last-good')
+        self.assertEqual(m.docker_updated, 123)
+        self.assertIn('last sample', m.docker_status)
+
+    def test_optional_metadata_timeout_keeps_fresh_stats(self):
+        import subprocess
+        m = self.monitor()
+        self.poll(m, [self.stats([{'Name': 'fresh', 'MemPerc': '3%'}]),
+                      subprocess.TimeoutExpired(['docker', 'ps'], 5)])
+        self.assertEqual(m.containers[0]['Name'], 'fresh')
+        self.assertGreater(m.docker_updated, 123)
+
+    def test_unavailable_percentage_does_not_drop_other_containers(self):
+        m = self.monitor()
+        self.poll(m, [self.stats([{'Name': 'running', 'MemPerc': '2%'},
+                                 {'Name': 'stopped', 'MemPerc': '--'}]), self.stats([])])
+        self.assertEqual({r['Name'] for r in m.containers}, {'running', 'stopped'})
+
+    def test_daemon_error_keeps_data_and_explains_retry(self):
+        import subprocess
+        m = self.monitor()
+        self.poll(m, [subprocess.CompletedProcess([], 1, '', 'Cannot connect to the Docker daemon')])
+        self.assertEqual(m.containers[0]['Name'], 'last-good')
+        self.assertIn('retrying', m.docker_status)
+
+    def test_successful_empty_response_clears_obsolete_containers(self):
+        m = self.monitor()
+        self.poll(m, [self.stats([]), self.stats([])])
+        self.assertEqual(m.containers, [])
+        self.assertEqual(m.docker_updated, 456)
+        self.assertIn('0 containers', m.docker_status)
+
+    def test_invalid_response_retains_last_sample(self):
+        import subprocess
+        m = self.monitor()
+        self.poll(m, [subprocess.CompletedProcess([], 0, 'not JSON', '')])
+        self.assertEqual(m.containers[0]['Name'], 'last-good')
+        self.assertIn('Invalid Docker stats', m.docker_status)
+
+    def test_first_timeout_does_not_claim_cached_data(self):
+        import subprocess
+        m = self.monitor()
+        m.containers, m.docker_updated = [], None
+        self.poll(m, [subprocess.TimeoutExpired(['docker', 'stats'], 30)])
+        self.assertIn('timed out', m.docker_status)
+        self.assertNotIn('last sample', m.docker_status)
+
 
 if __name__ == '__main__':
     unittest.main()
