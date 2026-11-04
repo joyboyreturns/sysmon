@@ -132,6 +132,34 @@ def read(path, fallback='unknown'):
         return fallback
 
 
+def cpu_in_list(cpu, listing):
+    """Match a logical CPU against the kernel's comma-separated CPU ranges."""
+    for part in listing.split(','):
+        try:
+            ends = list(map(int, part.strip().split('-')))
+            if len(ends) == 1 and cpu == ends[0]:
+                return True
+            if len(ends) == 2 and ends[0] <= cpu <= ends[1]:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def core_kind(info, cpu):
+    if info.get('vendor_id') == 'GenuineIntel':
+        # Kernel hybrid PMUs explicitly associate logical CPUs with Core/Atom.
+        for pmu, label in [('cpu_core', 'Performance core (P-core)'),
+                           ('cpu_atom', 'Efficiency core (E-core)')]:
+            listing = read('/sys/bus/event_source/devices/' + pmu + '/cpus', '')
+            if cpu_in_list(int(cpu), listing):
+                return label
+        # Comet Lake is a uniform design, predating Intel's hybrid P/E split.
+        if info.get('cpu family') == '6' and info.get('model') in ('165', '166'):
+            return 'Standard Core (Comet Lake; no P/E split)'
+    return 'Unknown (kernel does not report core class)'
+
+
 def hardware():
     info = []
     for block in read('/proc/cpuinfo', '').split('\n\n'):
@@ -141,9 +169,7 @@ def hardware():
             continue
         n = d['processor']
         base = '/sys/devices/system/cpu/cpu' + n
-        kind = read(base + '/topology/core_type', '')
-        # Linux x86 topology core_type: Intel Atom=1, Core=2. Do not guess on other CPUs.
-        kind = {'1': 'Efficiency (Atom)', '2': 'Performance (Core)'}.get(kind, 'Uniform / not reported') if d.get('vendor_id') == 'GenuineIntel' else 'Not reported'
+        kind = core_kind(d, n)
         info.append(dict(id=n, model=d.get('model name', d.get('Processor', platform.machine())),
                          vendor=d.get('vendor_id', 'unknown'), core=read(base + '/topology/core_id'),
                          socket=read(base + '/topology/physical_package_id'),
@@ -266,6 +292,15 @@ class App:
                 r = m.hardware[0]
                 self.text(r['model'])
                 self.text('Vendor: %s · architecture: %s · reported cache: %s' % (r['vendor'], platform.machine(), r['cache']))
+            classes = collections.Counter()
+            seen = set()
+            for core in m.hardware:
+                key = (core['socket'], core['core'])
+                if key not in seen:
+                    classes[core['kind']] += 1
+                    seen.add(key)
+            for kind, count in classes.items():
+                self.text('%d physical cores: %s' % (count, kind))
             self.text('Each CPU below is a logical thread. Siblings share a physical core.')
             self.chart('Total history', m.history)
             for r in m.hardware:
@@ -274,7 +309,8 @@ class App:
                 self.bar('CPU ' + n, m.cpu.get('cpu' + n, 0))
                 freq = read(r['base'] + '/cpufreq/scaling_cur_freq', '')
                 freq = '%.0f MHz' % (float(freq) / 1000) if freq.isdigit() else 'unavailable'
-                self.text('Type: %s · frequency: %s · governor: %s' % (r['kind'], freq, read(r['base'] + '/cpufreq/scaling_governor')))
+                self.text('Type: ' + r['kind'])
+                self.text('Frequency: %s · governor: %s' % (freq, read(r['base'] + '/cpufreq/scaling_governor')))
             self.heading('TEMPERATURES')
             for path in glob.glob('/sys/class/hwmon/hwmon*/temp*_input'):
                 v = read(path, '')

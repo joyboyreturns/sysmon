@@ -56,7 +56,7 @@ sysmon --help
 - Logical CPU usage is 0–100%. Process and Docker CPU can exceed 100% (100% = one logical CPU); their bars saturate at 100% while the number retains the full value.
 - RAM used is total minus available. Memory breakdown categories can overlap.
 - Docker RAM is the Docker CLI working-set figure and its configured limit. Percentage is relative to that limit. Docker polling runs separately, typically every 3–4 seconds; the tab shows sample age. Stopped containers may report zero statistics.
-- Intel hybrid core labels use Linux's reported topology type. Unsupported/unreported types are marked accordingly; sysmon does not infer core types from frequency.
+- Intel hybrid core labels use Linux's `cpu_core` / `cpu_atom` PMU CPU lists: Performance (P-core) and Efficiency (E-core). Comet Lake family/model IDs are labeled Standard Core (no P/E split). Other unreported types remain Unknown; sysmon does not infer types from clock speed. See [Linux hybrid PMU documentation](https://github.com/torvalds/linux/blob/master/tools/perf/Documentation/intel-hybrid.txt) and [Intel's Comet Lake i3-10100F specification](https://www.intel.com/content/www/us/en/products/sku/203473/intel-core-i310100f-processor-6m-cache-up-to-4-30-ghz/specifications.html).
 - CPU topology, clock and temperatures depend on kernel/sysfs availability. No root needed for host monitoring. Docker needs existing daemon access.
 - Network bars scale against the current peak interface rate; counters include virtual interfaces, so summing them may double-count traffic.
 - Read-only monitoring: no process termination, container control, command-line/environment capture, or external telemetry.

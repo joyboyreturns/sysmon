@@ -2,10 +2,28 @@ import os
 import sys
 import time
 import unittest
-from sysmon.app import memory_bytes, percent, bytesize
+from unittest.mock import patch
+from sysmon.app import memory_bytes, percent, bytesize, core_kind, cpu_in_list
 
 
 class Metrics(unittest.TestCase):
+    def test_core_class_detection(self):
+        intel = {'vendor_id': 'GenuineIntel', 'cpu family': '6', 'model': '165'}
+        with patch('sysmon.app.read', return_value=''):
+            self.assertIn('no P/E split', core_kind(intel, '0'))
+            self.assertIn('Unknown', core_kind({'vendor_id': 'AuthenticAMD'}, '0'))
+            self.assertIn('Unknown', core_kind(dict(intel, model='999'), '0'))
+        def pmus(path, fallback=''):
+            return '0-7' if '/cpu_core/' in path else '8-15'
+        with patch('sysmon.app.read', side_effect=pmus):
+            self.assertIn('P-core', core_kind(intel, '2'))
+            self.assertIn('E-core', core_kind(intel, '9'))
+
+    def test_cpu_range_membership(self):
+        self.assertTrue(cpu_in_list(12, '0-3,8,10-15'))
+        self.assertFalse(cpu_in_list(4, '0-3,8,10-15'))
+        self.assertFalse(cpu_in_list(0, ''))
+
     def test_docker_memory_sorting_uses_bytes(self):
         self.assertGreater(memory_bytes('1.5GiB / 16GiB'), memory_bytes('950MiB / 16GiB'))
         self.assertEqual(memory_bytes('512MiB / 16GiB'), 512 * 1024**2)
