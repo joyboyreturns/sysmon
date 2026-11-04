@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sysmon-terminal"
+version = "1.0.0"
+description = "Interactive Linux system monitor with CPU topology and Docker usage"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+classifiers = ["Operating System :: POSIX :: Linux", "Environment :: Console :: Curses", "Programming Language :: Python :: 3"]
+
+[project.scripts]
+sysmon = "sysmon.app:main"
+
+[tool.setuptools.packages.find]
+include = ["sysmon*"]
