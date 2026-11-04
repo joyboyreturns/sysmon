@@ -3,6 +3,8 @@
 import argparse
 import glob
 import platform
+import re
+import struct
 import collections
 import curses
 import json
@@ -146,18 +148,98 @@ def cpu_in_list(cpu, listing):
     return False
 
 
+# ARM implementer/part identifiers, as published in util-linux lscpu-arm.c.
+ARM_VENDORS = {0x41: 'Arm', 0x42: 'Broadcom', 0x43: 'Cavium', 0x46: 'Fujitsu',
+               0x48: 'HiSilicon', 0x4e: 'NVIDIA', 0x50: 'APM', 0x51: 'Qualcomm',
+               0x53: 'Samsung', 0x61: 'Apple', 0x69: 'Intel', 0xc0: 'Ampere'}
+ARM_PARTS = {0xd03: 'Cortex-A53', 0xd04: 'Cortex-A35', 0xd05: 'Cortex-A55',
+             0xd07: 'Cortex-A57', 0xd08: 'Cortex-A72', 0xd09: 'Cortex-A73',
+             0xd0a: 'Cortex-A75', 0xd0b: 'Cortex-A76', 0xd0c: 'Neoverse-N1',
+             0xd0d: 'Cortex-A77', 0xd40: 'Neoverse-V1', 0xd41: 'Cortex-A78',
+             0xd44: 'Cortex-X1', 0xd46: 'Cortex-A510', 0xd47: 'Cortex-A710',
+             0xd48: 'Cortex-X2', 0xd49: 'Neoverse-N2', 0xd4d: 'Cortex-A715',
+             0xd4e: 'Cortex-X3', 0xd4f: 'Neoverse-V2', 0xd80: 'Cortex-A520',
+             0xd81: 'Cortex-A720', 0xd82: 'Cortex-X4', 0xd84: 'Neoverse-V3',
+             0xd85: 'Cortex-X925', 0xd87: 'Cortex-A725'}
+
+
+def number(value, default=-1):
+    try:
+        return int(value, 0)
+    except (ValueError, TypeError):
+        return default
+
+
+def cpuid(cpu, leaf):
+    """Optional read-only CPUID, pinned to the requested logical CPU.
+
+    Uses the kernel device when already accessible, or the optional cpuid and
+    taskset utilities. No executable memory, privilege changes or dependencies.
+    """
+    try:
+        with open('/dev/cpu/%s/cpuid' % cpu, 'rb', buffering=0) as f:
+            return struct.unpack('<IIII', os.pread(f.fileno(), 16, leaf))
+    except (OSError, ValueError, struct.error):
+        pass
+    if not shutil.which('cpuid') or not shutil.which('taskset'):
+        return None
+    try:
+        proc = subprocess.run(['taskset', '-c', str(cpu), 'cpuid', '-1', '-r',
+                               '-l', hex(leaf), '-s', '0'], capture_output=True,
+                              text=True, timeout=1)
+        if proc.returncode:
+            return None
+        regs = dict(re.findall(r'\b(eax|ebx|ecx|edx)=0x([0-9a-fA-F]+)', proc.stdout))
+        return tuple(int(regs[r], 16) for r in ('eax', 'ebx', 'ecx', 'edx'))
+    except (OSError, subprocess.TimeoutExpired, KeyError, ValueError):
+        return None
+
+
 def core_kind(info, cpu):
-    if info.get('vendor_id') == 'GenuineIntel':
-        # Kernel hybrid PMUs explicitly associate logical CPUs with Core/Atom.
+    vendor = info.get('vendor_id', '')
+    if vendor == 'GenuineIntel':
         for pmu, label in [('cpu_core', 'Performance core (P-core)'),
                            ('cpu_atom', 'Efficiency core (E-core)')]:
             listing = read('/sys/bus/event_source/devices/' + pmu + '/cpus', '')
             if cpu_in_list(int(cpu), listing):
                 return label
-        # Comet Lake is a uniform design, predating Intel's hybrid P/E split.
         if info.get('cpu family') == '6' and info.get('model') in ('165', '166'):
             return 'Standard Core (Comet Lake; no P/E split)'
+        maximum = cpuid(cpu, 0)
+        if maximum and maximum[0] >= 0x1a:
+            regs = cpuid(cpu, 0x1a)
+            if regs:
+                label = {0x40: 'Performance core (P-core)',
+                         0x20: 'Efficiency core (E-core)'}.get(regs[0] >> 24)
+                if label:
+                    return label
+        return 'Intel core (class unreported)'
+    if vendor in ('AuthenticAMD', 'HygonGenuine'):
+        maximum = cpuid(cpu, 0x80000000)
+        if maximum and maximum[0] >= 0x80000026:
+            regs = cpuid(cpu, 0x80000026)
+            if regs and (regs[1] & 0xffff) and (regs[0] & (1 << 30)):
+                code = regs[1] >> 28
+                return {0: 'Performance core (AMD)', 1: 'Efficiency / compact core (AMD)',
+                        2: 'Low-power core (AMD)'}.get(code, 'AMD core (reported class %d)' % code)
+        return ('AMD' if vendor == 'AuthenticAMD' else 'Hygon') + ' core (class unreported)'
+    if 'CPU implementer' in info:
+        impl, part = number(info['CPU implementer']), number(info.get('CPU part'))
+        vendor = ARM_VENDORS.get(impl, 'ARM implementer ' + info['CPU implementer'])
+        name = ARM_PARTS.get(part) if impl == 0x41 else None
+        return '%s %s' % (vendor, name or 'core (part %s)' % info.get('CPU part', 'unreported'))
+    if 'uarch' in info:
+        return info['uarch'] + ' (RISC-V)'
     return 'Unknown (kernel does not report core class)'
+
+
+def cpu_identity(info):
+    vendor = info.get('vendor_id') or info.get('vendor')
+    if not vendor and 'CPU implementer' in info:
+        vendor = ARM_VENDORS.get(number(info['CPU implementer']), info['CPU implementer'])
+    model = (info.get('model name') or info.get('Processor') or info.get('cpu model')
+             or info.get('cpu') or info.get('uarch') or info.get('isa') or platform.machine())
+    return vendor or 'unreported', model
 
 
 def hardware():
@@ -170,8 +252,12 @@ def hardware():
         n = d['processor']
         base = '/sys/devices/system/cpu/cpu' + n
         kind = core_kind(d, n)
-        info.append(dict(id=n, model=d.get('model name', d.get('Processor', platform.machine())),
-                         vendor=d.get('vendor_id', 'unknown'), core=read(base + '/topology/core_id'),
+        vendor, model = cpu_identity(d)
+        info.append(dict(id=n, model=model,
+                         family=d.get('cpu family', d.get('CPU architecture', 'unreported')),
+                         model_id=d.get('model', d.get('CPU part', 'unreported')),
+                         capacity=read(base + '/cpu_capacity', 'unreported'),
+                         vendor=vendor, core=read(base + '/topology/core_id'),
                          socket=read(base + '/topology/physical_package_id'),
                          siblings=read(base + '/topology/thread_siblings_list'), kind=kind,
                          cache=d.get('cache size', 'unknown'), base=base))
@@ -302,6 +388,7 @@ class App:
             for kind, count in classes.items():
                 self.text('%d physical cores: %s' % (count, kind))
             self.text('Each CPU below is a logical thread. Siblings share a physical core.')
+            self.text('Unreported classes may be uniform, hidden by a VM, or unsupported by the kernel.')
             self.chart('Total history', m.history)
             for r in m.hardware:
                 n = r['id']
@@ -310,6 +397,7 @@ class App:
                 freq = read(r['base'] + '/cpufreq/scaling_cur_freq', '')
                 freq = '%.0f MHz' % (float(freq) / 1000) if freq.isdigit() else 'unavailable'
                 self.text('Type: ' + r['kind'])
+                self.text('Family: %s · model/part: %s · capacity: %s' % (r['family'], r['model_id'], r['capacity']))
                 self.text('Frequency: %s · governor: %s' % (freq, read(r['base'] + '/cpufreq/scaling_governor')))
             self.heading('TEMPERATURES')
             for path in glob.glob('/sys/class/hwmon/hwmon*/temp*_input'):

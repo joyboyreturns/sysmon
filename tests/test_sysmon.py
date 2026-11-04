@@ -3,21 +3,48 @@ import sys
 import time
 import unittest
 from unittest.mock import patch
-from sysmon.app import memory_bytes, percent, bytesize, core_kind, cpu_in_list
+from sysmon.app import memory_bytes, percent, bytesize, core_kind, cpu_in_list, cpu_identity
 
 
 class Metrics(unittest.TestCase):
     def test_core_class_detection(self):
         intel = {'vendor_id': 'GenuineIntel', 'cpu family': '6', 'model': '165'}
-        with patch('sysmon.app.read', return_value=''):
+        with patch('sysmon.app.read', return_value=''), patch('sysmon.app.cpuid', return_value=None):
             self.assertIn('no P/E split', core_kind(intel, '0'))
-            self.assertIn('Unknown', core_kind({'vendor_id': 'AuthenticAMD'}, '0'))
-            self.assertIn('Unknown', core_kind(dict(intel, model='999'), '0'))
+            self.assertIn('AMD core (class unreported)', core_kind({'vendor_id': 'AuthenticAMD'}, '0'))
+            self.assertIn('class unreported', core_kind(dict(intel, model='999'), '0'))
         def pmus(path, fallback=''):
             return '0-7' if '/cpu_core/' in path else '8-15'
         with patch('sysmon.app.read', side_effect=pmus):
             self.assertIn('P-core', core_kind(intel, '2'))
             self.assertIn('E-core', core_kind(intel, '9'))
+
+    def test_amd_cpuid_classes(self):
+        amd = {'vendor_id': 'AuthenticAMD'}
+        for code, label in [(0, 'Performance'), (1, 'compact'), (2, 'Low-power')]:
+            def regs(cpu, leaf):
+                return (0x80000026, 0, 0, 0) if leaf == 0x80000000 else (1 << 30, (code << 28) | 2, 0, 0)
+            with patch('sysmon.app.cpuid', side_effect=regs):
+                self.assertIn(label, core_kind(amd, '2'))
+        # A supported leaf without the heterogeneous-core flag is insufficient.
+        with patch('sysmon.app.cpuid', side_effect=[(0x80000026, 0, 0, 0), (0, 2, 0, 0)]):
+            self.assertIn('unreported', core_kind(amd, '0'))
+
+    def test_intel_cpuid_fallback(self):
+        for code, label in [(0x40, 'P-core'), (0x20, 'E-core')]:
+            with patch('sysmon.app.read', return_value=''), patch('sysmon.app.cpuid',
+                      side_effect=[(0x1a, 0, 0, 0), (code << 24, 0, 0, 0)]):
+                self.assertIn(label, core_kind({'vendor_id': 'GenuineIntel'}, '0'))
+
+    def test_arm_riscv_and_unknown_identity(self):
+        arm = {'CPU implementer': '0x41', 'CPU part': '0xd05'}
+        self.assertIn('Cortex-A55', core_kind(arm, '0'))
+        self.assertEqual(cpu_identity(arm)[0], 'Arm')
+        self.assertIn('Qualcomm', core_kind({'CPU implementer': '0x51', 'CPU part': '0xfff'}, '0'))
+        self.assertIn('0xfff', core_kind({'CPU implementer': '0x99', 'CPU part': '0xfff'}, '0'))
+        self.assertIn('RISC-V', core_kind({'uarch': 'sifive,u74-mc'}, '0'))
+        self.assertEqual(cpu_identity({'cpu': 'POWER10', 'vendor': 'IBM'}), ('IBM', 'POWER10'))
+        self.assertIn('Unknown', core_kind({}, '0'))
 
     def test_cpu_range_membership(self):
         self.assertTrue(cpu_in_list(12, '0-3,8,10-15'))
